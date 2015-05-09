@@ -30,8 +30,8 @@ class GenericForeignKeyField(fields.ToOneField):
     def get_related_resource(self, related_instance):
         self._to_class = self.to.get(type(related_instance), None)
 
-        if self._to_class is None:
-            raise TypeError('no resource for model %s' % type(related_instance))
+        # if self._to_class is None:
+        #     raise TypeError('no resource for model %s' % type(related_instance))
 
         return super(GenericForeignKeyField, self).get_related_resource(related_instance)
 

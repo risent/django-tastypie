@@ -1,5 +1,6 @@
 from __future__ import unicode_literals
 import base64
+from hashlib import sha1
 import hmac
 import time
 import uuid
@@ -8,16 +9,11 @@ from django.conf import settings
 from django.contrib.auth import authenticate
 from django.core.exceptions import ImproperlyConfigured
 from django.middleware.csrf import _sanitize_token, constant_time_compare
-from django.utils.http import same_origin
+from django.utils.six.moves.urllib.parse import urlparse
 from django.utils.translation import ugettext as _
-from tastypie.http import HttpUnauthorized
-from tastypie.compat import get_user_model, get_username_field
 
-try:
-    from hashlib import sha1
-except ImportError:
-    import sha
-    sha1 = sha.sha
+from tastypie.compat import get_user_model, get_username_field
+from tastypie.http import HttpUnauthorized
 
 try:
     import python_digest
@@ -33,6 +29,23 @@ try:
     import oauth_provider
 except ImportError:
     oauth_provider = None
+
+
+def same_origin(url1, url2):
+    """
+    Checks if two URLs are 'same-origin'
+    """
+    PROTOCOL_TO_PORT = {
+        'http': 80,
+        'https': 443,
+    }
+    p1, p2 = urlparse(url1), urlparse(url2)
+    try:
+        o1 = (p1.scheme, p1.hostname, p1.port or PROTOCOL_TO_PORT[p1.scheme])
+        o2 = (p2.scheme, p2.hostname, p2.port or PROTOCOL_TO_PORT[p2.scheme])
+        return o1 == o2
+    except (ValueError, KeyError):
+        return False
 
 
 class Authentication(object):
@@ -189,9 +202,9 @@ class ApiKeyAuthentication(Authentication):
         username_field = get_username_field()
         User = get_user_model()
 
+        lookup_kwargs = {username_field: username}
         try:
-            lookup_kwargs = {username_field: username}
-            user = User.objects.get(**lookup_kwargs)
+            user = User.objects.select_related('api_key').get(**lookup_kwargs)
         except (User.DoesNotExist, User.MultipleObjectsReturned):
             return self._unauthorized()
 
@@ -212,7 +225,8 @@ class ApiKeyAuthentication(Authentication):
         from tastypie.models import ApiKey
 
         try:
-            ApiKey.objects.get(user=user, key=api_key)
+            if user.api_key.key != api_key:
+                return self._unauthorized()
         except ApiKey.DoesNotExist:
             return self._unauthorized()
 
@@ -314,7 +328,7 @@ class DigestAuthentication(Authentication):
         opaque = hmac.new(str(new_uuid).encode('utf-8'), digestmod=sha1).hexdigest()
         response['WWW-Authenticate'] = python_digest.build_digest_challenge(
             timestamp=time.time(),
-            secret=getattr(settings, 'SECRET_KEY', ''),
+            secret=settings.SECRET_KEY,
             realm=self.realm,
             opaque=opaque,
             stale=False
@@ -332,7 +346,7 @@ class DigestAuthentication(Authentication):
             return self._unauthorized()
 
         try:
-            (auth_type, data) = request.META['HTTP_AUTHORIZATION'].split(' ', 1)
+            auth_type, data = request.META['HTTP_AUTHORIZATION'].split(' ', 1)
 
             if auth_type.lower() != 'digest':
                 return self._unauthorized()
@@ -342,7 +356,7 @@ class DigestAuthentication(Authentication):
         digest_response = python_digest.parse_digest_credentials(request.META['HTTP_AUTHORIZATION'])
 
         # FIXME: Should the nonce be per-user?
-        if not python_digest.validate_nonce(digest_response.nonce, getattr(settings, 'SECRET_KEY', '')):
+        if not python_digest.validate_nonce(digest_response.nonce, settings.SECRET_KEY):
             return self._unauthorized()
 
         user = self.get_user(digest_response.username)
@@ -425,7 +439,7 @@ class OAuthAuthentication(Authentication):
             raise ImproperlyConfigured("The 'django-oauth-plus' package could not be imported. It is required for use with the 'OAuthAuthentication' class.")
 
     def is_authenticated(self, request, **kwargs):
-        from oauth_provider.store import store, InvalidTokenError
+        from oauth_provider.store import store
 
         if self.is_valid_request(request):
             oauth_request = oauth_provider.utils.get_oauth_request(request)

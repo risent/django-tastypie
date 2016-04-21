@@ -1,6 +1,6 @@
 from __future__ import unicode_literals
 
-from copy import deepcopy
+from copy import copy, deepcopy
 from datetime import datetime
 import logging
 import sys
@@ -25,6 +25,12 @@ try:
 except (ImproperlyConfigured, ImportError):
     GeometryField = None
 from django.db.models.constants import LOOKUP_SEP
+try:
+    from django.db.models.fields.related import\
+        SingleRelatedObjectDescriptor as ReverseOneToOneDescriptor
+except ImportError:
+    from django.db.models.fields.related_descriptors import\
+        ReverseOneToOneDescriptor
 from django.db.models.sql.constants import QUERY_TERMS
 from django.http import HttpResponse, HttpResponseNotFound, Http404
 from django.utils import six
@@ -40,6 +46,7 @@ from tastypie.constants import ALL, ALL_WITH_RELATIONS
 from tastypie.exceptions import (
     NotFound, BadRequest, InvalidFilterError, HydrationError, InvalidSortError,
     ImmediateHttpResponse, Unauthorized, UnsupportedFormat,
+    UnsupportedSerializationFormat, UnsupportedDeserializationFormat,
 )
 from tastypie import fields
 from tastypie import http
@@ -59,11 +66,6 @@ def sanitize(text):
     # We put the single quotes back, due to their frequent usage in exception
     # messages.
     return escape(text).replace('&#39;', "'").replace('&quot;', '"')
-
-
-class NOT_AVAILABLE:
-    def __str__(self):
-        return 'No such data is available.'
 
 
 class ResourceOptions(object):
@@ -93,7 +95,7 @@ class ResourceOptions(object):
     ordering = []
     object_class = None
     queryset = None
-    fields = []
+    fields = None
     excludes = []
     include_resource_uri = True
     include_absolute_url = False
@@ -131,18 +133,15 @@ class DeclarativeMetaclass(type):
         declared_fields = {}
 
         # Inherit any fields from parent(s).
-        try:
-            parents = [b for b in bases if issubclass(b, Resource)]
-            # Simulate the MRO.
-            parents.reverse()
+        parents = [b for b in bases if issubclass(b, Resource)]
+        # Simulate the MRO.
+        parents.reverse()
 
-            for p in parents:
-                parent_fields = getattr(p, 'base_fields', {})
+        for p in parents:
+            parent_fields = getattr(p, 'base_fields', {})
 
-                for field_name, field_object in parent_fields.items():
-                    attrs['base_fields'][field_name] = deepcopy(field_object)
-        except NameError:
-            pass
+            for field_name, field_object in parent_fields.items():
+                attrs['base_fields'][field_name] = deepcopy(field_object)
 
         for field_name, obj in attrs.copy().items():
             # Look for ``dehydrated_type`` instead of doing ``isinstance``,
@@ -194,15 +193,18 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
         # TypeError: object.__new__(method-wrapper) is not safe, use method-wrapper.__new__()
         # when trying to copy a generator used as a default. Wrap call to
         # generator in lambda to get around this error.
-        self.fields = deepcopy(self.base_fields)
+        self.fields = {k: copy(v) for k, v in self.base_fields.items()}
 
         if api_name is not None:
             self._meta.api_name = api_name
 
     def __getattr__(self, name):
-        if name in self.fields:
+        if name == '__setstate__':
+            raise AttributeError(name)
+        try:
             return self.fields[name]
-        raise AttributeError(name)
+        except KeyError:
+            raise AttributeError(name)
 
     def wrap_view(self, view):
         """
@@ -270,43 +272,52 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
 
         return wrapper
 
-    def _handle_500(self, request, exception):
-        the_trace = '\n'.join(traceback.format_exception(*(sys.exc_info())))
-        response_class = http.HttpApplicationError
-        response_code = 500
-
-        NOT_FOUND_EXCEPTIONS = (NotFound, ObjectDoesNotExist, Http404)
-
-        if isinstance(exception, NOT_FOUND_EXCEPTIONS):
-            response_class = HttpResponseNotFound
-            response_code = 404
-
+    def get_response_class_for_exception(self, request, exception):
+        """
+        Can be overridden to customize response classes used for uncaught
+        exceptions. Should always return a subclass of
+        ``django.http.HttpResponse``.
+        """
+        if isinstance(exception, (NotFound, ObjectDoesNotExist, Http404)):
+            return HttpResponseNotFound
+        elif isinstance(exception, UnsupportedSerializationFormat):
+            return http.HttpNotAcceptable
+        elif isinstance(exception, UnsupportedDeserializationFormat):
+            return http.HttpUnsupportedMediaType
         elif isinstance(exception, UnsupportedFormat):
-            response_class = http.HttpBadRequest
-            response_code = 400
+            return http.HttpBadRequest
+
+        return http.HttpApplicationError
+
+    def _handle_500(self, request, exception):
+        the_trace = traceback.format_exception(*sys.exc_info())
+        if six.PY2:
+            the_trace = [
+                six.text_type(line, 'utf-8')
+                for line in the_trace
+            ]
+        the_trace = u'\n'.join(the_trace)
+
+        response_class = self.get_response_class_for_exception(request, exception)
 
         if settings.DEBUG:
             data = {
                 "error_message": sanitize(six.text_type(exception)),
                 "traceback": the_trace,
             }
-            return self.error_response(request, data, response_class=response_class)
+        else:
+            data = {
+                "error_message": getattr(settings, 'TASTYPIE_CANNED_ERROR', "Sorry, this request could not be processed. Please try again later."),
+            }
 
-        # When DEBUG is False, send an error message to the admins (unless it's
-        # a 404, in which case we check the setting).
-
-        if not response_code == 404:
+        if response_class.status_code >= 500:
             log = logging.getLogger('django.request.tastypie')
             log.error('Internal Server Error: %s' % request.path, exc_info=True,
-                      extra={'status_code': response_code, 'request': request})
+                      extra={'status_code': response_class.status_code, 'request': request})
 
         # Send the signal so other apps are aware of the exception.
         got_request_exception.send(self.__class__, request=request)
 
-        # Prep the data going out.
-        data = {
-            "error_message": getattr(settings, 'TASTYPIE_CANNED_ERROR', "Sorry, this request could not be processed. Please try again later."),
-        }
         return self.error_response(request, data, response_class=response_class)
 
     def _build_reverse_url(self, name, args=None, kwargs=None):
@@ -727,7 +738,7 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
             via_uri=via_uri
         )
 
-    def build_filters(self, filters=None):
+    def build_filters(self, filters=None, ignore_bad_filters=False):
         """
         Allows for the filtering of applicable objects.
 
@@ -762,15 +773,20 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
 
     def detail_uri_kwargs(self, bundle_or_obj):
         """
-        This needs to be implemented at the user level.
+        Given a ``Bundle`` or an object (typically a ``Model`` instance),
+        it returns the extra kwargs needed to generate a detail URI.
 
-        Given a ``Bundle`` or an object, it returns the extra kwargs needed to
-        generate a detail URI.
-
-        ``ModelResource`` includes a full working version specific to Django's
-        ``Models``.
+        By default, it uses this resource's ``detail_uri_name`` in order to
+        create the URI.
         """
-        raise NotImplementedError()
+        kwargs = {}
+
+        if isinstance(bundle_or_obj, Bundle):
+            bundle_or_obj = bundle_or_obj.obj
+
+        kwargs[self._meta.detail_uri_name] = getattr(bundle_or_obj, self._meta.detail_uri_name)
+
+        return kwargs
 
     def resource_uri_kwargs(self, bundle_or_obj=None):
         """
@@ -832,12 +848,18 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
         if prefix and chomped_uri.startswith(prefix):
             chomped_uri = chomped_uri[len(prefix) - 1:]
 
-        # We mangle the path a bit further & run URL resolution against *only*
-        # the current class. This ought to prevent bad URLs from resolving to
-        # incorrect data.
-        found_at = chomped_uri.rfind(self._meta.resource_name)
-        if found_at == -1:
+        # We know that we are dealing with a "detail" URI
+        # Look for the beginning of object key (last meaningful part of the URI)
+        end_of_resource_name = chomped_uri.rstrip('/').rfind('/')
+        if end_of_resource_name == -1:
             raise NotFound("An incorrect URL was provided '%s' for the '%s' resource." % (uri, self.__class__.__name__))
+        # We mangle the path a bit further & run URL resolution against *only*
+        # the current class (but up to detail key). This ought to prevent bad
+        # URLs from resolving to incorrect data.
+        split_url = chomped_uri.rstrip('/').rsplit('/', 1)[0]
+        if not split_url.endswith('/' + self._meta.resource_name):
+            raise NotFound("An incorrect URL was provided '%s' for the '%s' resource." % (uri, self.__class__.__name__))
+        found_at = chomped_uri.rfind(self._meta.resource_name, 0, end_of_resource_name)
         chomped_uri = chomped_uri[found_at:]
         try:
             for url_resolver in getattr(self, 'urls', []):
@@ -946,10 +968,12 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
                                 setattr(bundle.obj, field_object.attribute, value.obj)
                             except (ValueError, ObjectDoesNotExist):
                                 bundle.related_objects_to_save[field_object.attribute] = value.obj
+                        elif field_object.null:
+                            if not isinstance(getattr(bundle.obj.__class__, field_object.attribute, None), ReverseOneToOneDescriptor):
+                                # only update if not a reverse one to one field
+                                setattr(bundle.obj, field_object.attribute, value)
                         elif field_object.blank:
                             continue
-                        elif field_object.null:
-                            setattr(bundle.obj, field_object.attribute, value)
 
         return bundle
 
@@ -1040,7 +1064,13 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
                 else:
                     related_type = 'to_one'
                 data['fields'][field_name]['related_type'] = related_type
-                uri = reverse('api_get_schema', kwargs={'api_name': self._meta.api_name, 'resource_name': field_object.to_class()._meta.resource_name})
+                try:
+                    uri = self._build_reverse_url('api_get_schema', kwargs={
+                        'api_name': self._meta.api_name,
+                        'resource_name': field_object.to_class()._meta.resource_name
+                    })
+                except NoReverseMatch:
+                    uri = ''
                 data['fields'][field_name]['related_schema'] = uri
 
         return data
@@ -1082,14 +1112,6 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
         ``Models``.
         """
         raise NotImplementedError()
-
-    def apply_authorization_limits(self, request, object_list):
-        """
-        Deprecated.
-
-        FIXME: REMOVE BEFORE 1.0
-        """
-        return self._meta.authorization.apply_limits(request, object_list)
 
     def can_create(self):
         """
@@ -1765,18 +1787,26 @@ class ModelDeclarativeMetaclass(DeclarativeMetaclass):
             setattr(meta, 'object_class', meta.queryset.model)
 
         new_class = super(ModelDeclarativeMetaclass, cls).__new__(cls, name, bases, attrs)
-        include_fields = getattr(new_class._meta, 'fields', [])
+        specified_fields = getattr(new_class._meta, 'fields', None)
         excludes = getattr(new_class._meta, 'excludes', [])
         field_names = list(new_class.base_fields.keys())
+
+        include_fields = specified_fields
+
+        if include_fields is None:
+            if meta and meta.object_class:
+                include_fields = [f.name for f in meta.object_class._meta.fields]
+            else:
+                include_fields = []
 
         for field_name in field_names:
             if field_name == 'resource_uri':
                 continue
             if field_name in new_class.declared_fields:
                 continue
-            if len(include_fields) and field_name not in include_fields:
+            if specified_fields is not None and field_name not in include_fields:
                 del(new_class.base_fields[field_name])
-            if len(excludes) and field_name in excludes:
+            if field_name in excludes:
                 del(new_class.base_fields[field_name])
 
         # Add in the new fields.
@@ -1867,11 +1897,11 @@ class BaseModelResource(Resource):
                 continue
 
             # If field is not present in explicit field listing, skip
-            if fields and f.name not in fields:
+            if f.name not in fields:
                 continue
 
             # If field is in exclude list, skip
-            if excludes and f.name in excludes:
+            if f.name in excludes:
                 continue
 
             if cls.should_skip_field(f):
@@ -1973,7 +2003,7 @@ class BaseModelResource(Resource):
 
         return value
 
-    def build_filters(self, filters=None):
+    def build_filters(self, filters=None, ignore_bad_filters=False):
         """
         Given a dictionary of filters, create the necessary ORM-level filters.
 
@@ -2017,7 +2047,13 @@ class BaseModelResource(Resource):
             if len(filter_bits) and filter_bits[-1] in query_terms:
                 filter_type = filter_bits.pop()
 
-            lookup_bits = self.check_filtering(field_name, filter_type, filter_bits)
+            try:
+                lookup_bits = self.check_filtering(field_name, filter_type, filter_bits)
+            except InvalidFilterError:
+                if ignore_bad_filters:
+                    continue
+                else:
+                    raise
             value = self.filter_value_to_python(value, field_name, filters, filter_expr, filter_type)
 
             db_field_name = LOOKUP_SEP.join(lookup_bits)
@@ -2104,8 +2140,7 @@ class BaseModelResource(Resource):
         """
         A ORM-specific implementation of ``obj_get_list``.
 
-        Takes an optional ``request`` object, whose ``GET`` dictionary can be
-        used to narrow the query.
+        ``GET`` dictionary of bundle.request can be used to narrow the query.
         """
         filters = {}
 
@@ -2130,20 +2165,22 @@ class BaseModelResource(Resource):
         Takes optional ``kwargs``, which are used to narrow the query to find
         the instance.
         """
-        # prevents FieldError when looking up nested resources containing extra data
-        field_names = self._meta.object_class._meta.get_all_field_names()
-        field_names.append('pk')
-
-        kwargs = {k: v for k, v in kwargs.items() if k in field_names}
+        # Use ignore_bad_filters=True. `obj_get_list` filters based on
+        # request.GET, but `obj_get` usually filters based on `detail_uri_name`
+        # or data from a related field, so we don't want to raise errors if
+        # something doesn't explicitly match a configured filter.
+        applicable_filters = self.build_filters(filters=kwargs, ignore_bad_filters=True)
+        if self._meta.detail_uri_name in kwargs:
+            applicable_filters[self._meta.detail_uri_name] = kwargs[self._meta.detail_uri_name]
 
         try:
-            object_list = self.get_object_list(bundle.request).filter(**kwargs)
-            stringified_kwargs = ', '.join(["%s=%s" % (k, v) for k, v in kwargs.items()])
+            object_list = self.apply_filters(bundle.request, applicable_filters)
+            stringified_kwargs = ', '.join(["%s=%s" % (k, v) for k, v in applicable_filters.items()])
 
             if len(object_list) <= 0:
                 raise self._meta.object_class.DoesNotExist("Couldn't find an instance of '%s' which matched '%s'." % (self._meta.object_class.__name__, stringified_kwargs))
             elif len(object_list) > 1:
-                raise MultipleObjectsReturned("More than '%s' matched '%s'." % (self._meta.object_class.__name__, stringified_kwargs))
+                raise MultipleObjectsReturned("More than one '%s' matched '%s'." % (self._meta.object_class.__name__, stringified_kwargs))
 
             bundle.obj = object_list[0]
             self.authorized_read_detail(object_list, bundle)
@@ -2190,7 +2227,8 @@ class BaseModelResource(Resource):
                 continue
 
             # Skip readonly or related fields.
-            if field_object.readonly is True or field_object.is_related:
+            if field_object.readonly or field_object.is_related or\
+                    not field_object.attribute:
                 continue
 
             # Check for an optional method to do further hydration.
@@ -2199,10 +2237,7 @@ class BaseModelResource(Resource):
             if method:
                 bundle = method(bundle)
 
-            if field_object.attribute:
-                value = field_object.hydrate(bundle)
-
-            lookup_kwargs[identifier] = value
+            lookup_kwargs[identifier] = field_object.hydrate(bundle)
 
         return lookup_kwargs
 
@@ -2367,7 +2402,7 @@ class BaseModelResource(Resource):
             if related_obj is None:
                 related_obj = bundle.related_objects_to_save.get(field_object.attribute, None)
 
-            if field_object.related_name:
+            if related_obj and field_object.related_name:
                 # this might be a reverse relation, so we need to save this
                 # model, attach it to the related object, and save the related
                 # object.
@@ -2469,22 +2504,6 @@ class BaseModelResource(Resource):
                 related_objs.append(updated_related_bundle.obj)
 
             related_mngr.add(*related_objs)
-
-    def detail_uri_kwargs(self, bundle_or_obj):
-        """
-        Given a ``Bundle`` or an object (typically a ``Model`` instance),
-        it returns the extra kwargs needed to generate a detail URI.
-
-        By default, it uses the model's ``pk`` in order to create the URI.
-        """
-        kwargs = {}
-
-        if isinstance(bundle_or_obj, Bundle):
-            kwargs[self._meta.detail_uri_name] = getattr(bundle_or_obj.obj, self._meta.detail_uri_name)
-        else:
-            kwargs[self._meta.detail_uri_name] = getattr(bundle_or_obj, self._meta.detail_uri_name)
-
-        return kwargs
 
 
 class ModelResource(six.with_metaclass(ModelDeclarativeMetaclass, BaseModelResource)):

@@ -12,7 +12,7 @@ from tastypie.exceptions import ApiFieldError, NotFound
 from tastypie.fields import NOT_PROVIDED, ApiField, BooleanField, CharField,\
     DateField, DateTimeField, DecimalField, DictField, FileField, FloatField,\
     IntegerField, ListField, TimeField, ToOneField, ToManyField
-from tastypie.resources import ModelResource
+from tastypie.resources import ALL, ModelResource
 from tastypie.utils import aware_datetime
 
 from core.models import Note, Subject, MediaBit
@@ -618,6 +618,10 @@ class UserResource(ModelResource):
     class Meta:
         resource_name = 'users'
         queryset = User.objects.all()
+        filtering = {
+            'id': ALL,
+            'username': ALL,
+        }
 
     def get_resource_uri(self, bundle_or_obj=None, url_name='api_dispatch_list'):
         if bundle_or_obj is None:
@@ -774,6 +778,12 @@ class ToOneFieldTestCase(TestCase):
         self.assertEqual(field_2.hydrate(bundle), None)
 
         # Wrong resource URI.
+        field_3 = ToOneField(UserResource, 'author')
+        field_3.instance_name = 'fk'
+        bundle.data['fk'] = '/api/v1/users/123/'
+        self.assertRaises(ApiFieldError, field_3.hydrate, bundle)
+
+        # Wrong resource URI pk type.
         field_3 = ToOneField(UserResource, 'author')
         field_3.instance_name = 'fk'
         bundle.data['fk'] = '/api/v1/users/abc/'
@@ -1267,6 +1277,12 @@ class ToManyFieldTestCase(TestCase):
         self.assertEqual(field_3.hydrate_m2m(bundle_3), [])
 
         # Wrong resource URI.
+        field_4 = ToManyField(SubjectResource, 'subjects')
+        field_4.instance_name = 'm2m'
+        bundle_4 = Bundle(data={'m2m': ['/api/v1/subjects/123/']})
+        self.assertRaises(ApiFieldError, field_4.hydrate_m2m, bundle_4)
+
+        # Wrong resource URI pk type.
         field_4 = ToManyField(SubjectResource, 'subjects')
         field_4.instance_name = 'm2m'
         bundle_4 = Bundle(data={'m2m': ['/api/v1/subjects/abc/']})

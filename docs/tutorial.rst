@@ -35,7 +35,7 @@ Here is ``myapp/models.py``::
         user = models.ForeignKey(User)
         pub_date = models.DateTimeField(default=now)
         title = models.CharField(max_length=200)
-        slug = models.SlugField()
+        slug = models.SlugField(null=True, blank=True)
         body = models.TextField()
 
         def __unicode__(self):
@@ -59,7 +59,7 @@ your project or ``PYTHONPATH``.
 
   1. Download the dependencies:
 
-    * Python 2.6+ or Python 3.3+
+    * Python 2.7+ or Python 3.4+
     * Django 1.7+
     * ``python-mimeparse`` 0.1.4+ (http://pypi.python.org/pypi/python-mimeparse)
     * ``dateutil`` (http://labix.org/python-dateutil)
@@ -227,6 +227,11 @@ In order to handle our ``user`` relation, we'll need to create a
 
 
     class EntryResource(ModelResource):
+        # Maps `Entry.user` to a Tastypie `ForeignKey` field named `user`,
+        # which gets serialized using `UserResource`. The first appearance of
+        # 'user' on the next line of code is the Tastypie field name, the 2nd
+        # appearance tells the `ForeignKey` it maps to the `user` attribute of
+        # `Entry`. Field names and model attributes don't have to be the same.
         user = fields.ForeignKey(UserResource, 'user')
 
         class Meta:

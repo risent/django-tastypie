@@ -24,7 +24,7 @@ django-tastypie
 
 Creating delicious APIs for Django apps since 2010.
 
-Currently in beta (v0.13.0) but being used actively in production on several
+Currently in beta (v0.13.3) but being used actively in production on several
 sites.
 
 
@@ -71,7 +71,7 @@ A basic example looks like:
 
     # urls.py
     # =======
-    from django.conf.urls.defaults import url, include
+    from django.conf.urls import url, include
     from tastypie.api import Api
     from myapp.api import EntryResource
 

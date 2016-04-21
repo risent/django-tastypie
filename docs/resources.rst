@@ -105,7 +105,7 @@ As an example, we'll walk through what a GET request to a list endpoint (say
     of ``ModelResource``, this builds the ORM filters to apply
     (``ModelResource.build_filters``). It then gets the ``QuerySet`` via
     ``ModelResource.get_object_list`` (which performs
-    ``Resource.apply_authorization_limits`` to possibly limit the set the user
+    ``Resource.authorized_read_list`` to possibly limit the set the user
     can work with) and applies the built filters to it.
   * It then sorts the objects based on user input
     (``ModelResource.apply_sorting``).
@@ -586,11 +586,14 @@ The inner ``Meta`` class allows for class-level configuration of how the
 ``filtering``
 -------------
 
-  Provides a list of fields that the ``Resource`` will accept client
-  filtering on. Default is ``{}``.
+  Specifies the fields that the ``Resource`` will accept client filtering on.
+  Default is ``{}``.
 
   Keys should be the fieldnames as strings while values should be a list of
   accepted filter types.
+
+  This also restricts what fields can be filtered on when manually
+  calling ``obj_get`` and ``obj_get_list``.
 
 ``ordering``
 ------------
@@ -629,7 +632,11 @@ The inner ``Meta`` class allows for class-level configuration of how the
 ----------
 
   Controls what introspected fields the ``Resource`` should include.
-  A whitelist of fields. Default is ``[]``.
+  A whitelist of fields. Default is ``None``.
+
+  The default value of ``None`` means that all Django fields will be 
+  introspected. In order to specify that no fields should be introspected,
+  use ``[]``
 
 ``excludes``
 ------------
@@ -767,6 +774,14 @@ as handling exceptions better.
 Note that if ``BadRequest`` or an exception with a ``response`` attr are seen,
 there is special handling to either present a message back to the user or
 return the response traveling with the exception.
+
+``get_response_class_for_exception``
+------------------------------------
+
+.. method:: Resource.get_response_class_for_exception(self, request, exception)
+
+Can be overridden to customize response classes used for uncaught exceptions.
+Should always return a subclass of``django.http.HttpResponse``.
 
 ``base_urls``
 -------------
@@ -1189,16 +1204,6 @@ A hook to allow making returning the list of available objects.
 
 ``ModelResource`` includes a full working version specific to Django's
 ``Models``.
-
-``apply_authorization_limits``
-------------------------------
-
-.. method:: Resource.apply_authorization_limits(self, request, object_list)
-
-Allows the ``Authorization`` class to further limit the object list.
-Also a hook to customize per ``Resource``.
-
-Calls ``Authorization.apply_limits`` if available.
 
 ``can_create``
 --------------

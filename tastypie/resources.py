@@ -29,7 +29,6 @@ try:
 except ImportError:
     from django.db.models.fields.related_descriptors import\
         ReverseOneToOneDescriptor
-from django.db.models.sql.constants import QUERY_TERMS
 from django.http import HttpResponse, HttpResponseNotFound, Http404
 from django.utils import six
 from django.utils.cache import patch_cache_control, patch_vary_headers
@@ -41,7 +40,7 @@ from tastypie.authorization import ReadOnlyAuthorization
 from tastypie.bundle import Bundle
 from tastypie.cache import NoCache
 from tastypie.compat import NoReverseMatch, reverse, Resolver404, get_script_prefix
-from tastypie.constants import ALL, ALL_WITH_RELATIONS
+from tastypie.constants import ALL, ALL_WITH_RELATIONS, QUERY_TERMS
 from tastypie.exceptions import (
     NotFound, BadRequest, InvalidFilterError, HydrationError, InvalidSortError,
     ImmediateHttpResponse, Unauthorized, UnsupportedFormat,

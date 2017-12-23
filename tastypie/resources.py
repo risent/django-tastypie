@@ -2235,6 +2235,10 @@ class BaseModelResource(Resource):
                 continue
 
             field_object = self.fields[identifier]
+            
+            # Skip fields not in model fields
+            if identifier not in self.fields:
+                continue
 
             # Skip readonly or related fields.
             if field_object.readonly or field_object.is_related or\

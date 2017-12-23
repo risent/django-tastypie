@@ -8,6 +8,7 @@ def dict_strip_unicode_keys(uni_dict):
 
     Useful for converting a dict to a kwarg-able format.
     """
+    return uni_dict
     if six.PY3:
         return uni_dict
 
